@@ -1,3 +1,5 @@
+import { useEffect, useMemo, useState } from 'react';
+
 const STORAGE_KEY = 'kids-football-manager-v1';
 const HALF_OPTIONS = [20, 25, 30, 40, 45];
 
@@ -49,6 +51,14 @@ const createPlayer = (playerData) => ({
   isOnField: false,
 });
 
+const formatClock = (totalSeconds) => {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+};
+
+const makeDefaultPlayers = () => PLAYER_SEED.map((player) => createPlayer(player));
+
 const clonePositionMap = (positionsMap) => {
   const next = {};
   Object.keys(positionsMap || {}).forEach((key) => {
@@ -57,27 +67,27 @@ const clonePositionMap = (positionsMap) => {
   return next;
 };
 
-const makeDefaultPlayers = () =>
-  PLAYER_SEED.map((player) => createPlayer(player));
-
 const assignPlayersToPitch = (players, format) => {
   const positions = FORMATIONS[format].positions;
   const nextPitch = {};
+
   players.forEach((player, index) => {
     const position = positions[index] || null;
+
     if (position) {
       nextPitch[position] = player.id;
       player.currentPosition = position;
       player.isOnField = true;
-      player.positionStats[position] = player.positionStats[position] || 0;
       if (!player.positionHistory.includes(position)) {
         player.positionHistory.push(position);
       }
+      player.positionStats[position] = player.positionStats[position] || 0;
     } else {
       player.currentPosition = 'Bench';
       player.isOnField = false;
     }
   });
+
   return nextPitch;
 };
 
@@ -96,7 +106,6 @@ const createMatchState = () => {
     positionsMap,
     players,
     events: [],
-    lastSavedAt: new Date().toISOString(),
   };
 };
 
@@ -104,41 +113,36 @@ const loadSavedMatch = () => {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return createMatchState();
-    const parsed = JSON.parse(raw);
-    return parsed;
-  } catch (error) {
+    return JSON.parse(raw);
+  } catch {
     return createMatchState();
   }
 };
 
-const formatClock = (totalSeconds) => {
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-};
-
 const getMinutesInMatch = (matchState) => matchState.halfLength * 2 * 60;
 
-const getSubSuggestion = (players, positionsMap, format) => {
+const getSubSuggestion = (players, positionsMap) => {
   const onFieldIds = Object.values(positionsMap).filter(Boolean);
-  const benchPlayers = players.filter((player) => !onFieldIds.includes(player.id));
-  if (!benchPlayers.length) {
-    return null;
-  }
+  const bench = players.filter((player) => !onFieldIds.includes(player.id));
+
+  if (!bench.length || !onFieldIds.length) return null;
 
   const weakestOnField = [...players]
     .filter((player) => onFieldIds.includes(player.id))
     .sort((a, b) => a.secondsPlayed - b.secondsPlayed)[0];
 
-  const bestIncoming = [...benchPlayers].sort((a, b) => {
-    const aPref = a.preferredPositions.includes(weakestOnField?.currentPosition || '') ? 1 : 0;
-    const bPref = b.preferredPositions.includes(weakestOnField?.currentPosition || '') ? 1 : 0;
-    return b.secondsPlayed - a.secondsPlayed + (bPref - aPref);
+  const bestIncoming = [...bench].sort((a, b) => {
+    const aIsPreferred = weakestOnField
+      ? a.preferredPositions.includes(weakestOnField.currentPosition)
+      : false;
+    const bIsPreferred = weakestOnField
+      ? b.preferredPositions.includes(weakestOnField.currentPosition)
+      : false;
+
+    return Number(bIsPreferred) - Number(aIsPreferred) || a.secondsPlayed - b.secondsPlayed;
   })[0];
 
-  if (!weakestOnField || !bestIncoming) {
-    return null;
-  }
+  if (!weakestOnField || !bestIncoming) return null;
 
   return {
     playerOutId: weakestOnField.id,
@@ -149,63 +153,57 @@ const getSubSuggestion = (players, positionsMap, format) => {
 export default function App() {
   const [match, setMatch] = useState(() => loadSavedMatch());
   const [playerName, setPlayerName] = useState('');
-  const [newPlayerPreferred, setNewPlayerPreferred] = useState('MID');
+  const [preferredPos, setPreferredPos] = useState('MID');
   const [subOutId, setSubOutId] = useState('');
   const [subInId, setSubInId] = useState('');
-  const [selectedPosition, setSelectedPosition] = useState('');
 
-  const currentPositions = useMemo(
-    () => FORMATIONS[match.format].positions,
-    [match.format]
-  );
+  const positions = FORMATIONS[match.format].positions;
 
   useEffect(() => {
     if (!match.isRunning) return undefined;
 
-    const interval = setInterval(() => {
-      setMatch((previous) => {
-        const nextSeconds = previous.seconds + 1;
-        const totalMinutes = getMinutesInMatch(previous);
+    const timer = setInterval(() => {
+      setMatch((prev) => {
+        const nextSeconds = prev.seconds + 1;
+        const maxSeconds = getMinutesInMatch(prev);
 
-        if (nextSeconds >= totalMinutes) {
+        if (nextSeconds >= maxSeconds) {
           return {
-            ...previous,
-            seconds: totalMinutes,
+            ...prev,
+            seconds: maxSeconds,
             isRunning: false,
             currentHalf: 2,
             events: [
-              ...previous.events,
+              ...prev.events,
               {
                 id: createId(),
                 type: 'match-end',
-                time: totalMinutes,
+                time: maxSeconds,
                 summary: 'Full time',
               },
             ],
           };
         }
 
-        const nextHalf = nextSeconds >= previous.halfLength * 60 ? 2 : 1;
+        const nextHalf = nextSeconds >= prev.halfLength * 60 ? 2 : 1;
 
-        const updatedPlayers = previous.players.map((player) => {
-          const isOnField = Object.values(previous.positionsMap).includes(player.id);
-          if (!isOnField) return player;
-
-          const currentPosition = player.currentPosition;
-          const nextPositionStats = {
-            ...player.positionStats,
-            [currentPosition]: (player.positionStats[currentPosition] || 0) + 1,
-          };
+        const updatedPlayers = prev.players.map((player) => {
+          const onField = Object.values(prev.positionsMap).includes(player.id);
+          if (!onField) return player;
 
           return {
             ...player,
             secondsPlayed: player.secondsPlayed + 1,
-            positionStats: nextPositionStats,
+            positionStats: {
+              ...player.positionStats,
+              [player.currentPosition]:
+                (player.positionStats[player.currentPosition] || 0) + 1,
+            },
           };
         });
 
         return {
-          ...previous,
+          ...prev,
           seconds: nextSeconds,
           currentHalf: nextHalf,
           players: updatedPlayers,
@@ -213,7 +211,7 @@ export default function App() {
       });
     }, 1000);
 
-    return () => clearInterval(interval);
+    return () => clearInterval(timer);
   }, [match.isRunning]);
 
   useEffect(() => {
@@ -221,19 +219,18 @@ export default function App() {
   }, [match]);
 
   const suggestion = useMemo(
-    () => getSubSuggestion(match.players, match.positionsMap, match.format),
-    [match.players, match.positionsMap, match.format]
+    () => getSubSuggestion(match.players, match.positionsMap),
+    [match.players, match.positionsMap]
   );
 
   const onFieldPlayers = useMemo(
-    () =>
-      match.players.filter((player) => Object.values(match.positionsMap).includes(player.id)),
+    () => match.players.filter((player) => Object.values(match.positionsMap).includes(player.id)),
     [match.players, match.positionsMap]
   );
 
   const handleFormatChange = (nextFormat) => {
-    setMatch((previous) => {
-      const players = previous.players.map((player) => ({
+    setMatch((prev) => {
+      const players = prev.players.map((player) => ({
         ...player,
         currentPosition: 'Bench',
         isOnField: false,
@@ -242,16 +239,16 @@ export default function App() {
       const nextPitch = assignPlayersToPitch(players, nextFormat);
 
       return {
-        ...previous,
+        ...prev,
         format: nextFormat,
         positionsMap: nextPitch,
         players,
         events: [
-          ...previous.events,
+          ...prev.events,
           {
             id: createId(),
             type: 'format-change',
-            time: previous.seconds,
+            time: prev.seconds,
             summary: `Format changed to ${FORMATIONS[nextFormat].label}`,
           },
         ],
@@ -262,20 +259,19 @@ export default function App() {
   const handleAddPlayer = () => {
     if (!playerName.trim()) return;
 
-    setMatch((previous) => {
+    setMatch((prev) => {
       const newPlayer = createPlayer({
         name: playerName.trim(),
-        preferredPositions: [newPlayerPreferred],
+        preferredPositions: [preferredPos],
       });
 
-      const updatedPlayers = [...previous.players, newPlayer];
-      const nextPitch = clonePositionMap(previous.positionsMap);
-
-      const firstEmptyPosition = currentPositions.find(
+      const updatedPlayers = [...prev.players, newPlayer];
+      const nextPitch = clonePositionMap(prev.positionsMap);
+      const firstEmptyPosition = positions.find(
         (position) => !Object.values(nextPitch).includes(newPlayer.id)
       );
 
-      if (firstEmptyPosition && Object.keys(nextPitch).length < currentPositions.length) {
+      if (firstEmptyPosition && Object.keys(nextPitch).length < positions.length) {
         nextPitch[firstEmptyPosition] = newPlayer.id;
         newPlayer.currentPosition = firstEmptyPosition;
         newPlayer.isOnField = true;
@@ -286,15 +282,15 @@ export default function App() {
       }
 
       return {
-        ...previous,
+        ...prev,
         players: updatedPlayers,
         positionsMap: nextPitch,
         events: [
-          ...previous.events,
+          ...prev.events,
           {
             id: createId(),
             type: 'player-added',
-            time: previous.seconds,
+            time: prev.seconds,
             summary: `${newPlayer.name} added to squad`,
           },
         ],
@@ -305,27 +301,29 @@ export default function App() {
   };
 
   const handleMovePlayer = (playerId, newPosition) => {
-    setMatch((previous) => {
-      const previousMap = clonePositionMap(previous.positionsMap);
-      const currentKey = Object.keys(previousMap).find((key) => previousMap[key] === playerId);
+    setMatch((prev) => {
+      const previousMap = clonePositionMap(prev.positionsMap);
+      const currentSlot = Object.keys(previousMap).find((key) => previousMap[key] === playerId);
 
-      if (currentKey) {
-        delete previousMap[currentKey];
+      if (currentSlot) {
+        delete previousMap[currentSlot];
       }
 
       previousMap[newPosition] = playerId;
 
-      const players = previous.players.map((player) => {
+      const players = prev.players.map((player) => {
         if (player.id !== playerId) return player;
 
-        const positionStats = { ...player.positionStats };
-        positionStats[newPosition] = positionStats[newPosition] || 0;
+        const nextStats = {
+          ...player.positionStats,
+          [newPosition]: player.positionStats[newPosition] || 0,
+        };
 
         return {
           ...player,
           currentPosition: newPosition,
           isOnField: true,
-          positionStats,
+          positionStats: nextStats,
           positionHistory: player.positionHistory.includes(newPosition)
             ? player.positionHistory
             : [...player.positionHistory, newPosition],
@@ -333,15 +331,15 @@ export default function App() {
       });
 
       return {
-        ...previous,
+        ...prev,
         players,
         positionsMap: previousMap,
         events: [
-          ...previous.events,
+          ...prev.events,
           {
             id: createId(),
             type: 'position-change',
-            time: previous.seconds,
+            time: prev.seconds,
             summary: `${players.find((player) => player.id === playerId)?.name || 'Player'} moved to ${newPosition}`,
           },
         ],
@@ -352,19 +350,19 @@ export default function App() {
   const handleSubstitute = () => {
     if (!subOutId || !subInId || subOutId === subInId) return;
 
-    setMatch((previous) => {
-      const positionsMap = clonePositionMap(previous.positionsMap);
+    setMatch((prev) => {
+      const positionsMap = clonePositionMap(prev.positionsMap);
       const outPosition = Object.keys(positionsMap).find((key) => positionsMap[key] === subOutId);
-      const inPlayer = previous.players.find((player) => player.id === subInId);
+      const incomingPlayer = prev.players.find((player) => player.id === subInId);
 
-      if (!outPosition || !inPlayer) return previous;
+      if (!outPosition || !incomingPlayer) return prev;
 
-      const outPlayer = previous.players.find((player) => player.id === subOutId);
+      const outgoingPlayer = prev.players.find((player) => player.id === subOutId);
 
       delete positionsMap[outPosition];
-      positionsMap[outPosition] = inPlayer.id;
+      positionsMap[outPosition] = incomingPlayer.id;
 
-      const players = previous.players.map((player) => {
+      const players = prev.players.map((player) => {
         if (player.id === subOutId) {
           return {
             ...player,
@@ -374,16 +372,14 @@ export default function App() {
         }
 
         if (player.id === subInId) {
-          const nextStats = {
-            ...player.positionStats,
-            [outPosition]: player.positionStats[outPosition] || 0,
-          };
-
           return {
             ...player,
             currentPosition: outPosition,
             isOnField: true,
-            positionStats: nextStats,
+            positionStats: {
+              ...player.positionStats,
+              [outPosition]: player.positionStats[outPosition] || 0,
+            },
             positionHistory: player.positionHistory.includes(outPosition)
               ? player.positionHistory
               : [...player.positionHistory, outPosition],
@@ -394,16 +390,16 @@ export default function App() {
       });
 
       return {
-        ...previous,
+        ...prev,
         players,
         positionsMap,
         events: [
-          ...previous.events,
+          ...prev.events,
           {
             id: createId(),
             type: 'substitution',
-            time: previous.seconds,
-            summary: `${outPlayer?.name || 'Player out'} replaced by ${inPlayer.name} at ${outPosition}`,
+            time: prev.seconds,
+            summary: `${outgoingPlayer?.name || 'Player'} replaced by ${incomingPlayer.name} at ${outPosition}`,
           },
         ],
       };
@@ -420,8 +416,7 @@ export default function App() {
   };
 
   const handleReset = () => {
-    const freshMatch = createMatchState();
-    setMatch(freshMatch);
+    setMatch(createMatchState());
     setSubOutId('');
     setSubInId('');
   };
@@ -434,7 +429,9 @@ export default function App() {
           <h1>Match control panel</h1>
         </div>
         <div className="header-actions">
-          <button className="secondary" onClick={handleReset}>Reset match</button>
+          <button className="secondary" onClick={handleReset}>
+            Reset match
+          </button>
           <button onClick={() => setMatch((prev) => ({ ...prev, isRunning: !prev.isRunning }))}>
             {match.isRunning ? 'Pause match' : 'Start match'}
           </button>
@@ -452,12 +449,11 @@ export default function App() {
 
         <label>
           Format
-          <select
-            value={match.format}
-            onChange={(event) => handleFormatChange(Number(event.target.value))}
-          >
+          <select value={match.format} onChange={(event) => handleFormatChange(Number(event.target.value))}>
             {Object.entries(FORMATIONS).map(([value, config]) => (
-              <option key={value} value={value}>{config.label}</option>
+              <option key={value} value={value}>
+                {config.label}
+              </option>
             ))}
           </select>
         </label>
@@ -476,7 +472,9 @@ export default function App() {
             }
           >
             {HALF_OPTIONS.map((minutes) => (
-              <option key={minutes} value={minutes}>{minutes} mins</option>
+              <option key={minutes} value={minutes}>
+                {minutes} mins
+              </option>
             ))}
           </select>
         </label>
@@ -498,15 +496,18 @@ export default function App() {
       <div className="content-grid">
         <aside className="panel left-panel">
           <h3>Squad</h3>
+
           <div className="add-player">
             <input
               value={playerName}
               placeholder="Add player"
               onChange={(event) => setPlayerName(event.target.value)}
             />
-            <select value={newPlayerPreferred} onChange={(event) => setNewPlayerPreferred(event.target.value)}>
+            <select value={preferredPos} onChange={(event) => setPreferredPos(event.target.value)}>
               {['GK', 'DEF', 'MID', 'CM', 'WING', 'LW', 'RW', 'ST'].map((pos) => (
-                <option key={pos} value={pos}>{pos}</option>
+                <option key={pos} value={pos}>
+                  {pos}
+                </option>
               ))}
             </select>
             <button onClick={handleAddPlayer}>Add</button>
@@ -521,10 +522,7 @@ export default function App() {
                 </div>
                 <div className="metrics">
                   <span>{formatClock(player.secondsPlayed)} mins</span>
-                  <button
-                    className="inline"
-                    onClick={() => setSelectedPosition(player.currentPosition)}
-                  >
+                  <button className="inline" onClick={() => handleMovePlayer(player.id, player.currentPosition)}>
                     Move
                   </button>
                 </div>
@@ -546,13 +544,14 @@ export default function App() {
           </div>
 
           <div className="pitch-grid">
-            {currentPositions.map((position) => {
+            {positions.map((position) => {
               const playerId = match.positionsMap[position];
               const player = match.players.find((item) => item.id === playerId);
 
               return (
                 <div key={position} className="pitch-slot">
                   <span className="slot-label">{position}</span>
+
                   <div className="slot-player">
                     {player ? (
                       <>
@@ -569,8 +568,10 @@ export default function App() {
                       value={player.currentPosition}
                       onChange={(event) => handleMovePlayer(player.id, event.target.value)}
                     >
-                      {currentPositions.map((pos) => (
-                        <option key={pos} value={pos}>{pos}</option>
+                      {positions.map((pos) => (
+                        <option key={pos} value={pos}>
+                          {pos}
+                        </option>
                       ))}
                     </select>
                   )}
@@ -581,13 +582,16 @@ export default function App() {
 
           <div className="sub-panel">
             <h3>Substitution controls</h3>
+
             <div className="sub-row">
               <label>
                 Player out
                 <select value={subOutId} onChange={(event) => setSubOutId(event.target.value)}>
                   <option value="">Select</option>
                   {onFieldPlayers.map((player) => (
-                    <option key={player.id} value={player.id}>{player.name}</option>
+                    <option key={player.id} value={player.id}>
+                      {player.name}
+                    </option>
                   ))}
                 </select>
               </label>
@@ -599,7 +603,9 @@ export default function App() {
                   {match.players
                     .filter((player) => !Object.values(match.positionsMap).includes(player.id))
                     .map((player) => (
-                      <option key={player.id} value={player.id}>{player.name}</option>
+                      <option key={player.id} value={player.id}>
+                        {player.name}
+                      </option>
                     ))}
                 </select>
               </label>
@@ -614,7 +620,9 @@ export default function App() {
                   {match.players.find((player) => player.id === suggestion.playerOutId)?.name} for{' '}
                   {match.players.find((player) => player.id === suggestion.playerInId)?.name}
                 </span>
-                <button className="secondary" onClick={handleSuggestedSub}>Use suggestion</button>
+                <button className="secondary" onClick={handleSuggestedSub}>
+                  Use suggestion
+                </button>
               </div>
             )}
           </div>
